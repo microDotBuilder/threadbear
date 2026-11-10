@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneCommands, ThreadRouter } from '../../src/handover.ts';
+import { phoneCommands, primaryRemote, ThreadRouter } from '../../src/handover.ts';
 import { FakeAccounts, FakeAdapter, makeHarness, testConfig, tick, type Harness } from '../helpers/fakes.ts';
 import { Runner, SAVE_RETRY_MS, type Notification } from '../../src/runner.ts';
 import { ThreadStore } from '../../src/store.ts';
@@ -528,13 +528,15 @@ test("the phone's commands reach a thread a draining runner still has", async ()
   await host.update({ threadId: busy.id, archived: true });
   await host.respondApproval({ threadId: busy.id, approvalId: 'a1', decision: 'allow' });
   await host.share(busy.id, { access: 'link' });
-  assert.deepEqual(sent.map(([m]) => m), ['threads.send', 'threads.markSeen', 'threads.update', 'approvals.respond', 'threads.share']);
+  // Its buttons too, which a press from the phone checks first (Codex's review, 10 Nov).
+  await host.listButtons!(busy.id);
+  assert.deepEqual(sent.map(([m]) => m), ['threads.send', 'threads.markSeen', 'threads.update', 'approvals.respond', 'threads.share', 'buttons.list']);
   assert.deepEqual(sent[0][1], { threadId: busy.id, text: 'from my phone', origin: 'phone' });
   assert.ok((sent[1][1].seq as number) >= Number.MAX_SAFE_INTEGER, 'seen up to whatever it has');
   // The primary's own threads are done here.
   await host.update({ threadId: idle.id, title: 'Renamed' });
   assert.equal(b.runner.get(idle.id).title, 'Renamed');
-  assert.equal(sent.length, 5);
+  assert.equal(sent.length, 6);
   // Handed over just as the command went: done here instead.
   moved = true;
   await host.update({ threadId: busy.id, title: 'Came across' });
@@ -869,4 +871,24 @@ test('an idle thread hibernating in words is kept by a drain that was not asked 
   (h.runner as any).threads.get(t.id).rec.wakeWhen = { said: 'tomorrow', pending: true };
   await h.runner.beginDrain([], { onHandedOver: () => {}, backgroundMs: 30 * MIN });
   assert.deepEqual(h.runner.keeping(), [t.id]);
+});
+
+// 8 Nov: a thread finishing its turn on a draining runner couldn't
+// send_message the cloud runner's thread its brief named, as a draining
+// runner's tools left other runners' threads out.
+test('primaryRemote: a draining runner reaches other runners\' threads through the primary', async () => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const rows = { runners: [{ id: 'cloud', name: 'Hetzner Cloud', online: true, lastSeenAt: '' }], threads: [{ threadId: 'ba5bb5ec-1', runnerId: 'cloud', title: 'Rust port' }] };
+  const link = {
+    call: async <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+      calls.push([method, params]);
+      return (method === 'remoteThreads.list' ? rows : { queued: false }) as T;
+    },
+  };
+  const remote = primaryRemote(link);
+  const listed = await remote.list();
+  assert.equal(listed.threads[0].threadId, 'ba5bb5ec-1');
+  assert.deepEqual(calls[0], ['remoteThreads.list', { forTools: true }], 'the primary waits for the rows, as for its own tools');
+  await remote.call('ba5bb5ec-1', 'threads.send', { text: 'hi' });
+  assert.deepEqual(calls.at(-1), ['threads.send', { threadId: 'ba5bb5ec-1', text: 'hi' }]);
 });

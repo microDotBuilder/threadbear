@@ -99,6 +99,9 @@ public struct UserMessage: Sendable, Hashable {
 
     public enum Pending: Sendable, Hashable {
         case sending, queued
+        /// Held until a restarting runner is back, with a note under the
+        /// bubble saying so (`PendingMessage.waitingForRunner`).
+        case waitingForRunner
     }
 
     public init(text: String, images: [ImageRef] = [], origin: String? = nil, answers: [AskAnswer] = [], editOf: Int? = nil, review: ReviewAnswer? = nil, editable: Bool = false, pending: Pending? = nil) {
@@ -265,7 +268,19 @@ public struct ApprovalItem: Sendable, Hashable {
     public var startRequest: StartRequest?
     /// The agent's other calls waiting behind this one, shown on the same
     /// card (docs/protocol.md, "Queued calls"). Empty for most cards.
-    public var queued: [ApprovalRequest] = []
+    ///
+    /// Always empty on another runner's start request, and a start request
+    /// is never one of the queued calls. Both come from the runner that
+    /// owns the thread, which may be a secondary one: a queue on the card
+    /// swapped the request this Mac's runner read (where, which access, the
+    /// brief) for the runner's own harmless-looking calls, while Allow
+    /// still started what was filed (Daybreak, 8 Nov). A start request is
+    /// only ever shown and answered as itself.
+    public var queued: [ApprovalRequest] {
+        get { isStartRequest ? [] : queuedCalls }
+        set { queuedCalls = newValue.filter { $0.name != StartRequest.cardName } }
+    }
+    private var queuedCalls: [ApprovalRequest] = []
 
     public init(request: ApprovalRequest, resolution: ApprovalResolution? = nil, root: String? = nil, toolShown: Bool = false, startRequest: StartRequest? = nil) {
         self.request = request

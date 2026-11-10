@@ -15,6 +15,11 @@ struct Composer: View {
     /// palette; none for a box with no thread yet.
     var threadId: String? = nil
     var provider: String = "claude"
+    /// The thread's turn is running: with nothing typed, Send is Stop, as
+    /// on the Mac (something typed goes into the running turn instead).
+    var running = false
+    var stopping = false
+    var onStop: (() -> Void)? = nil
     /// Returns whether it went, so a failed send keeps the text.
     var onSend: (String, [PickedPhoto]) async -> Bool
     @State private var photos: [PickedPhoto] = []
@@ -78,19 +83,33 @@ struct Composer: View {
                 // Nothing more in while it goes: the box empties when it lands,
                 // taking anything added meanwhile with it (Mike, 7 Nov).
                 .disabled(sending)
-                Button(action: send) {
-                    // A photo can take a while to go up on mobile data.
-                    if sending && !photos.isEmpty {
-                        ProgressView().frame(width: 30, height: 30)
-                    } else {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 30))
+                if let onStop, running, words.message.isEmpty, photos.isEmpty, adding == 0, !sending, !hearing {
+                    Button(action: onStop) {
+                        if stopping {
+                            ProgressView().frame(width: 30, height: 30)
+                        } else {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 30))
+                        }
                     }
+                    // Once is enough: it's on its way until the turn stops.
+                    .disabled(stopping)
+                    .accessibilityLabel(stopping ? "Stopping" : "Stop")
+                } else {
+                    Button(action: send) {
+                        // A photo can take a while to go up on mobile data.
+                        if sending && !photos.isEmpty {
+                            ProgressView().frame(width: 30, height: 30)
+                        } else {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 30))
+                        }
+                    }
+                    // Not with a photo still on its way, which would be left behind.
+                    // Nor with Whisper still to type out what was said.
+                    .disabled((words.message.isEmpty && photos.isEmpty) || sending || adding > 0 || dictation.holdsWords)
+                    .accessibilityLabel("Send")
                 }
-                // Not with a photo still on its way, which would be left behind.
-                // Nor with Whisper still to type out what was said.
-                .disabled((words.message.isEmpty && photos.isEmpty) || sending || adding > 0 || dictation.holdsWords)
-                .accessibilityLabel("Send")
             }
         }
         .padding(.horizontal)
@@ -103,6 +122,23 @@ struct Composer: View {
             let args = ProcessInfo.processInfo.arguments
             if args.contains("-ThreadbearDictating") { dictation.fakeListening() }
             if args.contains("-ThreadbearTypingOut") { dictation.fakeTypingOut() }
+            // Whisper finishing: the words land as the bar goes, as after a real
+            // dictation, so a shot shows the box grown to fit them.
+            if args.contains("-ThreadbearTypedOut") {
+                dictation.fakeTypingOut()
+                try? await Task.sleep(for: .seconds(1.5))
+                text = "Can you also make the date picker work on the small phones, and check it in landscape while you are there"
+                dictation.fakeTypedOut()
+            }
+            // Apple's dictation: words typing in above the bar as he talks, then stop.
+            if args.contains("-ThreadbearHeardLive") {
+                dictation.fakeListening()
+                text = "Can you also make"
+                try? await Task.sleep(for: .seconds(0.6))
+                text = "Can you also make the date picker work on the small phones, and check it in landscape while you are there"
+                try? await Task.sleep(for: .seconds(0.6))
+                dictation.fakeStopped()
+            }
         }
         #endif
         .task {

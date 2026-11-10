@@ -7,8 +7,9 @@ import ThreadbearCore
 
 /// The transcript table. Owns Quick Look control for image clicks and the
 /// row context menu.
-final class TranscriptTableView: NSTableView {
+final class TranscriptTableView: NSTableView, TranscriptThreadHost {
     weak var controller: TranscriptController?
+    var hostedThreadId: String? { controller?.session?.threadId }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
@@ -146,6 +147,7 @@ final class TranscriptController: NSObject, NSTableViewDataSource, NSTableViewDe
     @objc private func buttonsChanged() {
         guard !buttonsPending else { return }
         buttonsPending = true
+        composerCard?.buttonsChanged()
         rerender { [weak self] in self?.buttonsPending = false } where: { RenderCache.holdsButtons($0) }
     }
 
@@ -983,10 +985,8 @@ final class TranscriptController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     func askPicturesAllowed(_ card: AsksCard) -> Bool {
         guard let session, let app = session.app, let thread = app.threads[session.threadId], thread.asksSeq == card.seq else { return false }
-        // A picture this Mac's runner keeps would be a path another
-        // runner hasn't got (as in the composer).
-        if let name = app.runnerName(of: thread) {
-            app.errorMessage = "Pictures can't go to \(name) from this Mac yet."
+        if let why = app.picturesRefusal(for: thread) {
+            app.errorMessage = why
             return false
         }
         return true
@@ -1075,6 +1075,9 @@ final class TranscriptController: NSObject, NSTableViewDataSource, NSTableViewDe
             app.toggleCardCollapsed(threadId: thread.id, seq: card.seq)
             return
         }
+        // The composer stops clicks reaching the card during a move; this is
+        // for anything else pressing it, as an answer now would miss the move.
+        if thread.moving?.ended == false { return }
         if action.hasPrefix("next:") {
             guard card.isOpen, let n = Int(action.dropFirst(5)), card.next.indices.contains(n) else { return }
             app.toggleFollowUp(threadId: thread.id, card: card, index: n)
@@ -1101,6 +1104,9 @@ final class TranscriptController: NSObject, NSTableViewDataSource, NSTableViewDe
             else if n != Decisions.ownAnswer, let now = app.threads[thread.id], app.picks(for: now)[index] == n {
                 composerCard?.pagePast(index)
             }
+        case "run":
+            guard thread.asksSeq == card.seq, let id = ask.run?.buttonId else { return }
+            app.pressRunButton(id, threadId: thread.id)
         case "link":
             guard ask.links.indices.contains(n), let url = ask.links[n].target else { return }
             if WorkLinks.reviewId(of: url) != nil { return openReviewLink(url) }
@@ -1123,8 +1129,13 @@ final class TranscriptController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// The pencil by one of Mike's messages: its text and pictures go into
     /// the composer, and sending replaces it (docs/protocol.md, "Editing a
     /// message").
+    var canGoBack: Bool {
+        guard let session, let thread = session.app?.threads[session.threadId] else { return true }
+        return Providers.info(thread.provider).rewind
+    }
+
     func editMessage(rowId: String) {
-        guard let session, let app = session.app,
+        guard canGoBack, let session, let app = session.app,
               case .user(let message)? = session.model.item(id: rowId)?.content, message.editable,
               let row = session.model.item(id: rowId) else { return }
         app.startEditing(threadId: session.threadId, seq: row.seq, text: message.text, images: message.images)

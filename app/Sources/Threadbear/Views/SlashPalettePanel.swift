@@ -86,7 +86,12 @@ final class SlashPaletteCoordinator: NSObject, NSWindowDelegate {
     func show(_ content: AnyView) {
         guard let parent = anchor?.window else { return }
         let panel = self.panel ?? makePanel()
-        hosting?.rootView = AnyView(PaletteFrame(content: content, resize: self))
+        // A window of its own doesn't inherit the main window's openURL, so
+        // anything clickable in it goes through OpenGate here too, as a
+        // link from no thread (Daybreak, 8 Nov). Descriptions have no links
+        // now (SlashPalette.description); this is for whatever comes next.
+        hosting?.rootView = AnyView(PaletteFrame(content: content, resize: self)
+            .environment(\.openURL, OpenGate.urlAction(files: .unknown)))
         if panel.parent !== parent {
             panel.parent?.removeChildWindow(panel)
             parent.addChildWindow(panel, ordered: .above)
@@ -123,7 +128,12 @@ final class SlashPaletteCoordinator: NSObject, NSWindowDelegate {
         // A drag going on wins over what's kept.
         let chosen = live ?? layout?.wrappedValue
         let width = CGFloat(chosen?.width.map { SlashPalette.Layout.width($0, window: window.width + 64) } ?? box.width)
-        let height = CGFloat(chosen?.height.map { SlashPalette.Layout.height($0, window: window.height) } ?? autoHeight)
+        // Never past the top of the window's content: a new thread's box
+        // sits in the middle of the window, with half the room a thread's
+        // has, and the palette ran up off the window (10 Nov 2026).
+        let top = parent.convertToScreen(parent.contentLayoutRect).maxY - 8
+        let room = max(top - (box.maxY + zoomed(8)), zoomed(160))
+        let height = min(CGFloat(chosen?.height.map { SlashPalette.Layout.height($0, window: window.height) } ?? autoHeight), room)
         var x = box.midX - width / 2
         x = min(max(x, window.minX + 8), window.maxX - 8 - width)
         let frame = NSRect(x: x, y: box.maxY + zoomed(8), width: width, height: height)

@@ -16,11 +16,15 @@ public struct SlashCommand: Sendable, Hashable, Codable, Identifiable {
     public var plugin: String?
     /// Its file on the runner's machine, when the runner found it.
     public var path: String?
+    /// Runs only as the start of a message: its frontmatter says
+    /// `disable-model-invocation: true`, so the agent can't run it when
+    /// it's named partway through one.
+    public var userOnly: Bool?
 
     public var id: String { name }
 
     public init(name: String, description: String? = nil, argumentHint: String? = nil, source: String,
-                aliases: [String]? = nil, scope: String? = nil, plugin: String? = nil, path: String? = nil) {
+                aliases: [String]? = nil, scope: String? = nil, plugin: String? = nil, path: String? = nil, userOnly: Bool? = nil) {
         self.name = name
         self.description = description
         self.argumentHint = argumentHint
@@ -29,6 +33,7 @@ public struct SlashCommand: Sendable, Hashable, Codable, Identifiable {
         self.scope = scope
         self.plugin = plugin
         self.path = path
+        self.userOnly = userOnly
     }
 
     /// What to type, with its arguments: "/code-review [low|medium|high] [target]".
@@ -65,7 +70,35 @@ public enum SlashPalette {
     }
 
     public static func cliName(_ provider: String) -> String {
-        provider == "codex" ? "Codex" : "Claude Code"
+        Providers.info(provider).cliName
+    }
+
+    /// A command being typed as the last word of the message: at its
+    /// start ("/co"), or partway through it ("then use /td"). `start` is
+    /// where its slash is, in UTF-16 units as the text view counts.
+    public struct Typed: Equatable, Sendable {
+        public var query: String
+        public var start: Int
+        public var midMessage: Bool { start > 0 }
+    }
+
+    /// The word at the end of the text, when it's a command being typed: a
+    /// slash at the start or after a space or line break, and no second
+    /// slash (a path, "/Users/"). Nil once a space follows it.
+    public static func typed(in text: String) -> Typed? {
+        let word = text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isWhitespace }).last.map(String.init) ?? text
+        guard word.hasPrefix("/") else { return nil }
+        let rest = word.dropFirst()
+        guard !rest.contains("/") else { return nil }
+        return Typed(query: String(rest), start: text.utf16.count - word.utf16.count)
+    }
+
+    /// What the palette offers partway through a message: skills the agent
+    /// can run when it reads one named there. A CLI's own commands, and
+    /// skills that only run as the start of a message, do nothing there
+    /// (claude -p, 9 Nov 2026).
+    public static func midMessage(_ commands: [SlashCommand]) -> [SlashCommand] {
+        commands.filter { $0.isSkill && $0.userOnly != true }
     }
 
     /// The command being typed, without its slash, while the message is
@@ -96,9 +129,16 @@ public enum SlashPalette {
     /// A command's description as it should read. Skills write theirs
     /// with inline markdown (`computercub`, **bold**), so that's rendered,
     /// on the one paragraph it came as. What won't parse stays as written.
+    ///
+    /// Links keep their words but stop being links. A description comes
+    /// from whoever wrote the skill (any cloned repo can have one), and
+    /// the palette is a window of its own, so a link in it went straight
+    /// to macOS: a `file:` link to a script ran it, past OpenGate's ask
+    /// (Daybreak, 8 Nov). The palette only needs the formatting.
     public static func description(_ text: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+        let parsed = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+        return parsed.withoutLinks
     }
 
     /// A path to show: the home folder as ~.
@@ -216,5 +256,15 @@ public enum SlashPalette {
     /// The recently used list after using `name`: newest first, eight kept.
     public static func used(_ name: String, recent: [String]) -> [String] {
         Array(([name] + recent.filter { $0 != name }).prefix(8))
+    }
+}
+
+extension AttributedString {
+    /// The same text with nothing in it clickable: every run's link (a
+    /// Markdown link or an autolink) taken off, its words left as they are.
+    public var withoutLinks: AttributedString {
+        var copy = self
+        for run in copy.runs where run.link != nil { copy[run.range].link = nil }
+        return copy
     }
 }
