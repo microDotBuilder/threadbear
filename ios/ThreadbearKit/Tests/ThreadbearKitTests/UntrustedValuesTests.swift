@@ -123,9 +123,12 @@ import Testing
             { _ = MarkdownBlock.parse(String(repeating: "`x` ![](x) ", count: 2_400)) },
             { _ = ThreadLinks.escapeDestinations(String(repeating: "`x` [a](work:x) ", count: 2_000)) },
         ]
+        // 0.25, not Mike's 0.1: `tb land` runs this at background priority,
+        // where an M1's efficiency cores take 0.14 s. With the fix undone it's
+        // 0.34 s or more at normal priority and 1.6 s or more in the background.
         for run in inputs {
             let seconds = cpuSeconds(run)
-            #expect(seconds < 0.1, "\(seconds) s")
+            #expect(seconds < 0.25, "\(seconds) s")
         }
         // A picture or link in a code span is still left as written.
         #expect(MarkdownBlock.parse("`![a](b.png)` ![c](d.png)") == [.paragraph("`![a](b.png)`"), .image(alt: "c", src: "d.png")])
