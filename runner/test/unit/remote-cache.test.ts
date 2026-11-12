@@ -12,6 +12,10 @@ import assert from 'node:assert/strict';
 const SCRIPTS = path.join(import.meta.dirname, '..', '..', '..', 'desktop', 'scripts');
 const TRIM = path.join(SCRIPTS, 'trim-remote-cache.sh');
 const HOUR = 3_600_000;
+// How long a script may take before it counts as stuck. Only a hang reaches
+// it, so it's generous: a deploy's rerun on a busy Mac took 34 s over a run
+// that takes 3 (12 Nov), and a 30 s limit called that a hang.
+const STUCK = 240_000;
 
 // A df that answers from how many target folders are left, so deleting one
 // really does free room. Each is worth 6 GiB.
@@ -49,7 +53,7 @@ echo "fake 0 0 $f 0% /"
   fs.writeFileSync(path.join(bin, 'du'), '#!/bin/bash\nif [ -f "$2/debug/out" ]; then echo "6000000 $2"; else echo "100 $2"; fi\n', { mode: 0o755 });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: path.join(root, 'home') };
   const left = () => fs.readdirSync(base).filter((n) => /^target(-|$)/.test(n)).sort();
-  const trim = (own = 'aaa') => spawnSync('/bin/bash', [TRIM, own], { cwd: base, env, encoding: 'utf8', timeout: 20_000 });
+  const trim = (own = 'aaa') => spawnSync('/bin/bash', [TRIM, own], { cwd: base, env, encoding: 'utf8', timeout: STUCK });
   return { root, bin, base, env, left, trim };
 }
 
@@ -138,7 +142,7 @@ test('remote.sh stops before copying anything when the host refuses, and marks i
   // An ssh that runs the command here, stdin and all.
   fs.writeFileSync(path.join(h.bin, 'ssh'), `#!/bin/bash\nshift\ncd "$HOME" && eval "$*"\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(h.bin, 'rsync'), `#!/bin/bash\ntouch ${JSON.stringify(log)}\n`, { mode: 0o755 });
-  const r = spawnSync('/bin/bash', [path.join(SCRIPTS, 'remote.sh'), 'somehost', '--', 'true'], { env: h.env, encoding: 'utf8', timeout: 20_000 });
+  const r = spawnSync('/bin/bash', [path.join(SCRIPTS, 'remote.sh'), 'somehost', '--', 'true'], { env: h.env, encoding: 'utf8', timeout: STUCK });
   assert.equal(r.status, 3, r.stderr);
   assert.equal(fs.existsSync(log), false, 'nothing copied to a full disk');
   assert.equal(fs.readdirSync(h.base).filter((n) => n.startsWith('target-')).length, 1, 'its target folder exists, so the age limit sees it used');
@@ -160,8 +164,26 @@ touch -t 202601010000 "$dest"
 # The host was too full for the first mkdir, and the trim then made room.
 rm -rf "$HOME"/.cache/threadbear-check/gpui/target-*
 `, { mode: 0o755 });
-  const r = spawnSync('/bin/bash', [path.join(SCRIPTS, 'remote.sh'), 'somehost', '--', 'true'], { env: h.env, encoding: 'utf8', timeout: 30_000 });
+  // The marker loop sleeps 60 s a turn, and an ssh that waited on it would
+  // come back once that ended: too close to a slow run on a busy Mac to tell
+  // apart by the clock. So its sleep here outlasts the limit, and waiting on
+  // it is a timeout however slow the rest is.
+  const sleeping = path.join(h.root, 'sleeping');
+  fs.writeFileSync(path.join(h.bin, 'sleep'), `#!/bin/bash
+[ "$1" = 60 ] || exec /bin/sleep "$@"
+echo $$ >>${JSON.stringify(sleeping)}
+exec /bin/sleep 600
+`, { mode: 0o755 });
+  const r = spawnSync('/bin/bash', [path.join(SCRIPTS, 'remote.sh'), 'somehost', '--', 'true'], { env: h.env, encoding: 'utf8', timeout: STUCK });
+  // Its sleep would otherwise sit there for ten minutes. The loop is on its
+  // own by now, so its sleep may be a moment behind the run's end.
+  for (let i = 0; i < 100 && !fs.existsSync(sleeping); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  const slept = fs.existsSync(sleeping) ? fs.readFileSync(sleeping, 'utf8').split('\n').filter(Boolean) : [];
+  for (const pid of slept) {
+    try { process.kill(Number(pid)); } catch { /* already gone */ }
+  }
   assert.equal(r.error, undefined, 'it returned rather than waiting for the marker loop');
+  assert.ok(slept.length > 0, 'the marker loop ran, with the sleep this test gave it');
   assert.equal(r.status, 0, r.stderr);
   const names = fs.readdirSync(h.base);
   const target = names.find((n) => n.startsWith('target-'))!;
@@ -252,7 +274,7 @@ test("a trim waits for another one on the same host, so a run can't start betwee
   // the pipe waits for the holder either way.
   const holder = path.join(h.root, 'hold.pl');
   fs.writeFileSync(holder, 'use Fcntl ":flock"; open(my $f, "<", ".") or die; flock($f, LOCK_EX) or die; $| = 1; print "held\\n"; sleep 3;');
-  const r = spawnSync('/bin/bash', ['-c', `perl ${JSON.stringify(holder)} | { read -r _; SECONDS=0; bash ${JSON.stringify(TRIM)} aaa; echo "took $SECONDS"; }`], { cwd: h.base, env: h.env, encoding: 'utf8', timeout: 20_000 });
+  const r = spawnSync('/bin/bash', ['-c', `perl ${JSON.stringify(holder)} | { read -r _; SECONDS=0; bash ${JSON.stringify(TRIM)} aaa; echo "took $SECONDS"; }`], { cwd: h.base, env: h.env, encoding: 'utf8', timeout: STUCK });
   assert.equal(r.status, 0, r.stderr);
   assert.ok(Number(/took (\d+)/.exec(r.stdout)![1]) >= 2, r.stdout);
 });
